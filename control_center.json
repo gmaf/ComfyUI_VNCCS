@@ -12,16 +12,6 @@
       "kind": "Klein9b"
     },
     {
-      "name": "MiniMax H3 Ref2VA Pruned FP8 Scaled",
-      "type": "unet",
-      "hf_repo": "Comfy-Org/MiniMax-H3",
-      "hf_path": "diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
-      "local_path": "models/diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
-      "version": "1.0",
-      "description": "Pruned FP8-scaled MiniMax H3 Ref2VA diffusion model.",
-      "kind": "minimaxh3"
-    },
-    {
       "name": "MiniMax H3 Ref2VA Pruned INT8 ConvRot",
       "type": "unet",
       "hf_repo": "Comfy-Org/MiniMax-H3",
