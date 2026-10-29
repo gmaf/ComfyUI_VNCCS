@@ -35,7 +35,7 @@ from .character_generator import (
 from .vnccs_control_center import _entry_kind, _find_model_on_disk, _apply_lora_standard
 from .h3_still import require_h3_still_support
 from .qwen_vl import _ensure_qwen_vl_assets, QWEN_VL_MODEL_FILENAME
-from .qwen_vl import configure_qwen_text_chat, parse_wizard_json, _validate_gguf_file
+from .qwen_vl import generate_wizard_text, parse_wizard_json
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 WORKFLOW_SAMPLER_DEFAULTS = {
@@ -886,15 +886,6 @@ async def vnccs_delete_costume(request):
 @logged_operation("ClothesDesigner", "wizard")
 def _clothes_wizard_response(post):
     try:
-        try:
-            import llama_cpp
-        except Exception as e:
-            return web.json_response({
-                "error": "DEPENDENCY_MISSING",
-                "message": f"llama-cpp-python is required for Clothes Wizard: {e}",
-                "model_name": "llama-cpp-python",
-            }, status=500)
-
         user_description = str(post.get("description", "")).strip()
         if not user_description:
             return web.Response(status=400, text="No clothes description provided")
@@ -907,15 +898,6 @@ def _clothes_wizard_response(post):
                 "message": str(e),
                 "model_name": QWEN_VL_MODEL_FILENAME,
             }, status=500)
-
-        try:
-            _validate_gguf_file(model_path, os.path.basename(model_path))
-        except Exception as e:
-            return web.json_response({
-                "error": "MODEL_INVALID",
-                "message": f"Qwen GGUF model file is invalid or incomplete: {e}",
-                "model_name": os.path.basename(model_path),
-            }, status=422)
 
         system_prompt = (
             "You are a professional anime/game character costume designer. "
@@ -954,17 +936,8 @@ Example for "Santa Claus costume":
 }}
 """
 
-        log_stage("loading_wizard_model", component="ClothesDesigner", model=os.path.basename(model_path))
-        llm = llama_cpp.Llama(
-            model_path=model_path,
-            n_ctx=4096,
-            n_gpu_layers=-1,
-            verbose=False,
-        )
-
-        configure_qwen_text_chat(llm)
-        log_stage("generating_description")
-        response = llm.create_chat_completion(
+        log_stage("generating_description", component="ClothesDesigner", model=os.path.basename(model_path))
+        content = generate_wizard_text(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -974,7 +947,6 @@ Example for "Santa Claus costume":
         )
 
         log_stage("parsing_description")
-        content = response["choices"][0]["message"]["content"]
         log_event("wizard_output", component="ClothesDesigner", level="debug", output=content)
         parsed = _parse_clothes_wizard_json(content or "")
         if parsed is None:

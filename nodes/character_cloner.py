@@ -37,10 +37,10 @@ def _source_image_path(image):
     return safe_join_under(directory, *parts)
 
 try:
-    from .qwen_vl import get_qwen_vl_chat_handler, parse_wizard_json, normalize_character_wizard_traits
+    from .qwen_vl import generate_wizard_text, parse_wizard_json, normalize_character_wizard_traits
     from .qwen_vl import _ensure_qwen_vl_assets, QWEN_VL_MODEL_FILENAME, _start_qwen_vl_download, qwen_vl_download_status
 except Exception:
-    from nodes.qwen_vl import get_qwen_vl_chat_handler, parse_wizard_json, normalize_character_wizard_traits
+    from nodes.qwen_vl import generate_wizard_text, parse_wizard_json, normalize_character_wizard_traits
     from nodes.qwen_vl import _ensure_qwen_vl_assets, QWEN_VL_MODEL_FILENAME, _start_qwen_vl_download, qwen_vl_download_status
 
 # VNCCS Installer (REMOVED: User requested Qwen2)
@@ -219,26 +219,6 @@ if server:
     @logged_operation("Cloner", "wizard")
     def _cloner_auto_generate_response(post):
         try:
-            import llama_cpp
-            import llama_cpp.llama_chat_format
-        except ImportError as error:
-            return web.json_response({"error": "DEPENDENCY_MISSING", "message": str(error), "model_name": "llama-cpp-python"}, status=500)
-        
-        lib_ver = getattr(llama_cpp, "__version__", "unknown")
-        
-        try:
-            try:
-                HandlerCls = get_qwen_vl_chat_handler(llama_cpp)
-            except RuntimeError as exc:
-                return web.json_response({
-                    "error": "DEPENDENCY_MISSING",
-                    "message": f"{exc} Lib Version: {lib_ver}",
-                    "model_name": f"llama-cpp-python {lib_ver}",
-                }, status=500)
-            
-            # Proceed with HandlerCls...
-
-            
             image_data = post.get("image_name")
             
             if not image_data:
@@ -272,7 +252,7 @@ if server:
                 return web.Response(status=404, text=f"Image {img_name} not found")
 
             try:
-                model_path, mmproj_path = _ensure_qwen_vl_assets(allow_download=False)
+                model_path, _ = _ensure_qwen_vl_assets(allow_download=False)
             except Exception as e:
                 return web.json_response({
                     "error": "MODEL_MISSING" if isinstance(e, FileNotFoundError) else "MODEL_INVALID",
@@ -280,26 +260,7 @@ if server:
                     "model_name": QWEN_VL_MODEL_FILENAME
                 }, status=500)
             
-             # 4. Initialize Llama
             try:
-                log_event("wizard_handler", level="debug", handler=HandlerCls.__name__)
-
-                log_stage("loading_wizard_model", component="Cloner", model=os.path.basename(model_path))
-                log_event("wizard_projector", level="debug", model=os.path.basename(mmproj_path))
-
-                chat_handler = HandlerCls(clip_model_path=mmproj_path, enable_thinking=False, verbose=False)
-                
-                llm = llama_cpp.Llama(
-                    model_path=model_path,
-                    chat_handler=chat_handler,
-                    n_ctx=4096, # Safe default for VL
-                    n_gpu_layers=-1, # Auto
-                    verbose=False
-                )
-                # ... Inference code ...
-                if not llm:
-                    raise RuntimeError("Failed to initialize Llama model.")
-
                 # 5. Run Inference
                 prompt_instruction = """Analyze the character in the image and strictly output valid JSON.
 Extract visible physical character traits using concise comma-separated tags.
@@ -353,15 +314,13 @@ Return all keys in a raw JSON object. Do not output the word 'tag' as a value.""
                     ]}
                 ]
                 
-                log_stage("describing_reference", component="Cloner")
-                response = llm.create_chat_completion(
+                log_stage("describing_reference", component="Cloner", model=os.path.basename(model_path))
+                content = generate_wizard_text(
                     messages=messages,
                     max_tokens=1024,
                     temperature=0.2
                 )
                 log_stage("parsing_description", component="Cloner")
-                
-                content = response["choices"][0]["message"]["content"]
                 log_event("wizard_output", component="Cloner", level="debug", output=content)
                 
                 # 6. Robust JSON Extraction

@@ -206,11 +206,11 @@ def _load_cloner(monkeypatch):
     """Load the cloner without tensor or model dependencies."""
     monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
     from nodes.qwen_vl import (
-        get_qwen_vl_chat_handler, parse_wizard_json, normalize_character_wizard_traits,
+        generate_wizard_text, parse_wizard_json, normalize_character_wizard_traits,
         _start_qwen_vl_download, qwen_vl_download_status,
     )
     assets = types.ModuleType("_vnccs.nodes.qwen_vl")
-    assets.get_qwen_vl_chat_handler = get_qwen_vl_chat_handler
+    assets.generate_wizard_text = generate_wizard_text
     assets.parse_wizard_json = parse_wizard_json
     assets.normalize_character_wizard_traits = normalize_character_wizard_traits
     assets._start_qwen_vl_download = _start_qwen_vl_download

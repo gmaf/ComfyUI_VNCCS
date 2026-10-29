@@ -825,6 +825,10 @@ def _without_gan_upscalers(config):
 
 
 def _get_cc_config(repo_id, prefer_remote=False):
+    # Fork: the packaged catalog is pinned in git and lists the files the
+    # deployment's model manifest downloads; never replace it from Hugging Face.
+    if _uses_packaged_cc_config(repo_id):
+        prefer_remote = False
     cached = _CC_CONFIG_CACHE.get(repo_id)
     now = time.time()
     if not prefer_remote and cached and now - cached.get("ts", 0) < 300:

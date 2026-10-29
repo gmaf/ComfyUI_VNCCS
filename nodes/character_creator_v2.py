@@ -38,7 +38,7 @@ from ..utils import (
 from .qwen_vl import _ensure_qwen_vl_assets, QWEN_VL_MODEL_FILENAME
 from .runtime_cleanup import inference_stage
 from .generator_context import serialized_generator
-from .qwen_vl import configure_qwen_text_chat, parse_wizard_json, normalize_character_wizard_traits, _validate_gguf_file
+from .qwen_vl import generate_wizard_text, parse_wizard_json, normalize_character_wizard_traits
 from .character_presets import CHARACTER_PRESETS, RACE_PRESETS, preset_key, race_features, race_prompt
 from .character_styles import (
     load_user_styles, save_user_style, delete_user_style, style_preview_path, style_preview_url,
@@ -1739,15 +1739,6 @@ if server:
     @logged_operation("Creator", "wizard")
     def _character_wizard_response(post):
         try:
-            try:
-                import llama_cpp
-            except Exception as e:
-                return web.json_response({
-                    "error": "DEPENDENCY_MISSING",
-                    "message": f"llama-cpp-python is required for Character Wizard: {e}",
-                    "model_name": "llama-cpp-python",
-                }, status=500)
-
             user_description = str(post.get("description", "")).strip()
             if not user_description:
                 return web.Response(status=400, text="No character description provided")
@@ -1760,15 +1751,6 @@ if server:
                     "message": str(e),
                     "model_name": QWEN_VL_MODEL_FILENAME,
                 }, status=500)
-
-            try:
-                _validate_gguf_file(model_path, os.path.basename(model_path))
-            except Exception as e:
-                return web.json_response({
-                    "error": "MODEL_INVALID",
-                    "message": f"Qwen GGUF model file is invalid or incomplete: {e}",
-                    "model_name": os.path.basename(model_path),
-                }, status=422)
 
             tag_options = _extract_character_tag_options(CHARACTER_PRESETS)
 
@@ -1828,17 +1810,8 @@ Example:
 }}
 """
 
-            log_stage("loading_wizard_model", component="Creator", model=os.path.basename(model_path))
-            llm = llama_cpp.Llama(
-                model_path=model_path,
-                n_ctx=6144,
-                n_gpu_layers=-1,
-                verbose=False,
-            )
-
-            configure_qwen_text_chat(llm)
-            log_stage("generating_description")
-            response = llm.create_chat_completion(
+            log_stage("generating_description", component="Creator", model=os.path.basename(model_path))
+            content = generate_wizard_text(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -1848,7 +1821,6 @@ Example:
             )
 
             log_stage("parsing_description")
-            content = response["choices"][0]["message"]["content"]
             log_event("wizard_output", component="Creator", output=content, truncate=False)
             parsed = _parse_character_wizard_json(content or "")
             if parsed is None:
