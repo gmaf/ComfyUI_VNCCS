@@ -159,6 +159,12 @@ def generate_wizard_text(messages, max_tokens=900, temperature=0.3):
             elif item.get("type") == "image_url" and image is None:
                 image = _image_from_data_url(item["image_url"]["url"])
 
+    # Generation reports progress against the last prompt id, which does not
+    # exist until a workflow has run; the Creator sets it the same way.
+    prompt_server = getattr(getattr(server, "PromptServer", None), "instance", None)
+    if prompt_server is not None and not hasattr(prompt_server, "last_prompt_id"):
+        prompt_server.last_prompt_id = "vnccs_wizard"
+
     with inference_stage():
         clip = _load_wizard_clip()
         return _call_comfy_node(
