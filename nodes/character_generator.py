@@ -266,6 +266,10 @@ def _first_tensor(value):
     return value
 
 
+# VNCCS_PROFILE=1 logs the duration of every ComfyUI node VNCCS runs internally.
+_PROFILE_NODES = os.environ.get("VNCCS_PROFILE", "").strip() in {"1", "true", "yes"}
+
+
 @inference_stage()
 def _call_comfy_node(class_name, **kwargs):
     vnccs_node_id = kwargs.pop("_vnccs_node_id", None)
@@ -290,8 +294,12 @@ def _call_comfy_node(class_name, **kwargs):
     signature = inspect.signature(method)
     accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
     accepted = kwargs if accepts_kwargs else {k: v for k, v in kwargs.items() if k in signature.parameters}
+    started = time.perf_counter()
     try:
         result = method(**accepted)
+        if _PROFILE_NODES:
+            log_event("node_timing", component="Profile", node=class_name,
+                      duration_s=round(time.perf_counter() - started, 3))
     except AttributeError as exc:
         if vnccs_node_id is None or "'NoneType' object has no attribute 'node_id'" not in str(exc):
             raise
