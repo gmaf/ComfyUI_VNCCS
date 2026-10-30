@@ -1995,8 +1995,9 @@ class VNCCS_CharacterGenerator:
         if not pose_parts:
             raise RuntimeError("MiniMax H3 generation requires at least one pose image.")
 
-        sampler_model = self._apply_pose_lora_to_model(
-            pipe_values["model"], pipe_values["clip"], pipe, lora_info
+        sampler_model = self._pose_model(
+            ("h3", id(pipe_values["model"])),
+            lambda: self._apply_pose_lora_to_model(pipe_values["model"], pipe_values["clip"], pipe, lora_info),
         )
         sampler_object = _call_comfy_node(
             "KSamplerSelect",
@@ -2129,6 +2130,49 @@ class VNCCS_CharacterGenerator:
             total = len(pose_parts)
             prompts = self._pose_prompts(prompt, total)
             generated = []
+            # Each pose runs as its own call; reuse one prepared model (LoRAs,
+            # QI2 cache wrapper) for all of them instead of re-patching and
+            # reloading the diffusion model once per pose.
+            outer_memo = getattr(self, "_pose_model_memo", None)
+            if outer_memo is None:
+                self._pose_model_memo = {}
+            try:
+                return self._run_pose_generation_each(
+                    pose_parts, character, pipe, prompts, settings, total, generated,
+                    lora_info=lora_info, background=background,
+                    sampler_settings=sampler_settings,
+                    vae_decode_settings=vae_decode_settings,
+                    bg_remove_settings=bg_remove_settings,
+                    unique_id=unique_id, stage=stage,
+                    preview_cache_dir=preview_cache_dir,
+                )
+            finally:
+                if outer_memo is None:
+                    self._pose_model_memo = None
+        return self._run_pose_generation_batch(
+            pose_parts, character, pipe, prompt, settings,
+            lora_info=lora_info, background=background,
+            sampler_settings=sampler_settings,
+            vae_decode_settings=vae_decode_settings,
+            bg_remove_settings=bg_remove_settings,
+            unique_id=unique_id, stage=stage,
+            progress_start=progress_start, progress_total=progress_total,
+        )
+
+    def _pose_model(self, key, build):
+        memo = getattr(self, "_pose_model_memo", None)
+        if memo is None:
+            return build()
+        if key not in memo:
+            memo[key] = build()
+        return memo[key]
+
+    def _run_pose_generation_each(
+        self, pose_parts, character, pipe, prompts, settings, total, generated,
+        lora_info=None, background="Green", sampler_settings=None,
+        vae_decode_settings=None, bg_remove_settings=None, unique_id=None,
+        stage="pose_generation", preview_cache_dir=None,
+    ):
             for index, pose in enumerate(pose_parts):
                 self._emit(
                     unique_id, stage, "running",
@@ -2158,6 +2202,12 @@ class VNCCS_CharacterGenerator:
                 )
             return self._safe_image_batch(generated, stage="incremental pose generation")
 
+    def _run_pose_generation_batch(
+        self, pose_parts, character, pipe, prompt, settings,
+        lora_info=None, background="Green", sampler_settings=None,
+        vae_decode_settings=None, bg_remove_settings=None, unique_id=None,
+        stage="pose_generation", progress_start=0, progress_total=None,
+    ):
         pipe_values = self._extract_pipe(pipe)
         qwen_settings = self._qwen_settings(settings, background)
         sampler = self._sampler_settings(pipe_values, sampler_settings)
@@ -2196,10 +2246,13 @@ class VNCCS_CharacterGenerator:
             total = len(pose_parts)
             decoded = []
             encode_progress(0, total)
-            sampler_model = self._apply_pose_lora_to_model(
-                pipe_values["model"], pipe_values["clip"], pipe, lora_info,
+            sampler_model, turbo = self._pose_model(
+                ("qi2", id(pipe_values["model"])),
+                lambda: self._qi2_prepare_model(
+                    self._apply_pose_lora_to_model(pipe_values["model"], pipe_values["clip"], pipe, lora_info),
+                    pipe, pipe_values,
+                ),
             )
-            sampler_model, turbo = self._qi2_prepare_model(sampler_model, pipe, pipe_values)
             sample_progress(0, total)
             decode_progress(0, total)
             for index, pose in enumerate(pose_parts, start=1):
@@ -2248,7 +2301,10 @@ class VNCCS_CharacterGenerator:
             **encoder_kwargs,
         )
 
-        sampler_model = self._apply_pose_lora_to_model(pipe_values["model"], pipe_values["clip"], pipe, lora_info)
+        sampler_model = self._pose_model(
+            ("klein", id(pipe_values["model"])),
+            lambda: self._apply_pose_lora_to_model(pipe_values["model"], pipe_values["clip"], pipe, lora_info),
+        )
         for index, (positive, negative) in enumerate(zip(positive_list, negative_list), start=1):
             self._validate_conditioning_for_model(pipe_values, positive, negative, f"Pose Generation item {index}")
         if positive_list:
@@ -2414,9 +2470,12 @@ class VNCCS_CharacterGenerator:
         return defaults.get("attention_mode", "sdpa")
 
     def _clean_vram_for_seedvr(self):
+        # Fork: no unload_all_models(). ComfyUI frees memory on its own when
+        # SeedVR needs it; unloading everything forced the generation models
+        # to reload from disk after every SeedVR stage. Unified-memory hosts
+        # (DGX Spark, 119 GB) hold all of them at once.
         gc.collect()
         if model_management is not None:
-            model_management.unload_all_models()
             model_management.soft_empty_cache()
         elif torch.cuda.is_available():
             torch.cuda.empty_cache()
