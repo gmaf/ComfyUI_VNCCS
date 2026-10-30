@@ -383,6 +383,82 @@ Return all keys in a raw JSON object. Do not output the word 'tag' as a value.""
         return await run_wizard_job(_cloner_auto_generate_response, post, "cloner")
 
 
+    CLOTHES_PARTS = {
+        "clothes": ("top", "bottom"),
+        "shoes": ("shoes",),
+        "accessories": ("face",),
+        "headwear": ("head",),
+        "bags": ("top",),
+    }
+
+    def _clothes_from_image_response(post):
+        """Describe the outfit worn in a picture as Clothes Designer fields (top, bottom, shoes, head, face)."""
+        image_data = post.get("image_name")
+        if not isinstance(image_data, dict) or not image_data.get("name"):
+            return web.Response(status=400, text="No image provided")
+        parts = [p for p in (post.get("parts") or list(CLOTHES_PARTS)) if p in CLOTHES_PARTS]
+        try:
+            image_parts = []
+            if image_data.get("subfolder"):
+                image_parts.append(safe_relative_path(image_data["subfolder"], "subfolder"))
+            image_parts.append(safe_relative_path(image_data["name"], "image_name"))
+            image_path = safe_join_under(folder_paths.get_input_directory(), *image_parts)
+        except ValueError as e:
+            return web.Response(status=400, text=str(e))
+        if not os.path.exists(image_path):
+            return web.Response(status=404, text="Image not found")
+        try:
+            _ensure_qwen_vl_assets(allow_download=False)
+        except Exception as e:
+            return web.json_response({"error": "MODEL_MISSING", "message": str(e), "model_name": QWEN_VL_MODEL_FILENAME}, status=500)
+
+        wanted = {
+            "clothes": "clothing on the upper body (top) and lower body (bottom)",
+            "shoes": "footwear (shoes)",
+            "accessories": "wearable items on the face such as glasses or masks (face)",
+            "headwear": "hats, hair ornaments and other headwear (head)",
+            "bags": "bags and carried items, appended to top",
+        }
+        instruction = (
+            "Describe the outfit worn by the person in the image for an image generator. Output valid JSON only "
+            "with exactly these string keys: top, bottom, shoes, head, face. Each value is a detailed visual "
+            "description of materials, colors, shape, fit and distinctive details. Describe only: "
+            + "; ".join(wanted[p] for p in parts)
+            + ". Use an empty string for everything else and for items that are not visible. Do not describe "
+            "the body, face, hair, pose, background or expression."
+        )
+        import base64
+        import io
+        from PIL import Image
+        with Image.open(image_path) as img:
+            img = _composite_pil_alpha(ImageOps.exif_transpose(img))
+            img.thumbnail((768, 768), Image.Resampling.LANCZOS)
+            buffered = io.BytesIO()
+            img.save(buffered, format="JPEG", quality=88)
+            b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        messages = [
+            {"role": "system", "content": "You describe clothing for costume design. Output valid JSON only."},
+            {"role": "user", "content": [{"type": "text", "text": instruction}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]},
+        ]
+        content = generate_wizard_text(messages=messages, max_tokens=1024, temperature=0.2)
+        data = parse_wizard_json(content or "")
+        if not isinstance(data, dict):
+            return web.json_response({"error": "INVALID_RESPONSE", "message": "The image wizard did not return a costume JSON object. Please try again."}, status=502)
+        allowed = {key for p in parts for key in CLOTHES_PARTS[p]}
+        return web.json_response({key: (str(data.get(key) or "") if key in allowed else "") for key in ("top", "bottom", "shoes", "head", "face")})
+
+    @server.PromptServer.instance.routes.post("/vnccs/clothes_from_image")
+    @privileged_route
+    async def clothes_from_image(request):
+        try:
+            post = await request.json()
+        except (ValueError, TypeError):
+            return web.json_response({"error": "Invalid JSON request"}, status=400)
+        if not isinstance(post, dict):
+            return web.json_response({"error": "Request must be an object"}, status=400)
+        return await run_wizard_job(_clothes_from_image_response, post, "clothes")
+
+
 NODE_CLASS_MAPPINGS = {
     "CharacterCloner": CharacterCloner,
 }

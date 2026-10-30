@@ -122,6 +122,68 @@ def _vnccs_register_endpoint():  # lazy registration to avoid import errors in a
                 "detail": str(e),
             }, status=500)
 
+    @PromptServer.instance.routes.post("/vnccs/rename")
+    async def vnccs_rename_character(request):
+        """Rename a character: its folder, <name>_config.json and the name stored in its JSON files."""
+        try:
+            from .utils import validate_privileged_request
+            validate_privileged_request(request)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=403)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        try:
+            from .utils import character_dir, ensure_safe_name, character_storage_lock
+            from .nodes.preview_runtime import run_preview_job
+            from .nodes.generator_context import forget_character_contexts
+            old = ensure_safe_name(str(data.get("name") or "").strip(), "character")
+            new = ensure_safe_name(str(data.get("new_name") or "").strip(), "character")
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if old == new:
+            return web.json_response({"error": "new name is the same"}, status=400)
+
+        def rename_character():
+            src, dst = character_dir(old), character_dir(new)
+            with character_storage_lock(src):
+                if not os.path.isdir(src):
+                    return f"Character '{old}' not found"
+                if os.path.exists(dst):
+                    return f"Character '{new}' already exists"
+                os.rename(src, dst)
+                forget_character_contexts(src)
+
+            def swap(value):
+                if isinstance(value, dict):
+                    return {k: swap(v) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [swap(v) for v in value]
+                return new if value == old else value
+
+            config = os.path.join(dst, f"{old}_config.json")
+            if os.path.exists(config):
+                os.rename(config, os.path.join(dst, f"{new}_config.json"))
+            for name in os.listdir(dst):
+                if not name.endswith(".json"):
+                    continue
+                path = os.path.join(dst, name)
+                with open(path, "r", encoding="utf-8") as f:
+                    content = json.load(f)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(swap(content), f, ensure_ascii=False, indent=2)
+            return None
+
+        try:
+            error = await run_preview_job(rename_character)
+        except Exception as e:
+            traceback.print_exc()
+            return web.json_response({"error": "rename failed", "detail": str(e)}, status=500)
+        if error:
+            return web.json_response({"error": error}, status=409 if "exists" in error else 404)
+        return web.json_response({"ok": True, "name": new})
+
     @PromptServer.instance.routes.post("/vnccs/create")
     @PromptServer.instance.routes.get("/vnccs/create")
     async def vnccs_create_character(request):
