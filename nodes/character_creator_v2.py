@@ -32,7 +32,7 @@ from ..utils import (
     sheets_dir, faces_dir, normalize_hair_tags, ensure_safe_name,
     get_full_path_agnostic, atomic_output_path, safe_join_under,
     privileged_route, file_fingerprint, config_path,
-    character_storage_lock, list_pose_preview_files,
+    character_storage_lock, list_pose_preview_files, list_character_files,
     StorageConflictError,
 )
 from .qwen_vl import _ensure_qwen_vl_assets, QWEN_VL_MODEL_FILENAME
@@ -1646,6 +1646,22 @@ if server:
         except Exception as e:
             log_event('exception', component='Creator', level='error', exc_info=True, truncate=False, message='Operation failed', error=str(e))
             return web.Response(status=500, text="Failed to load character info")
+
+    @server.PromptServer.instance.routes.get("/vnccs/character_files")
+    async def get_character_files(request):
+        """All files of a character with size and sha256 (see utils.list_character_files)."""
+        try:
+            name = ensure_safe_name(request.rel_url.query.get("character", ""), "character")
+            with_sha256 = request.rel_url.query.get("sha256", "1") != "0"
+            if not os.path.isdir(character_dir(name)):
+                return web.json_response({"error": "Character not found"}, status=404)
+            files = await asyncio.to_thread(list_character_files, name, with_sha256)
+            return web.json_response({"character": name, "files": files})
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=400)
+        except Exception as e:
+            log_event('exception', component='Creator', level='error', exc_info=True, truncate=False, message='Operation failed', error=str(e))
+            return web.Response(status=500, text="Failed to list character files")
 
     @server.PromptServer.instance.routes.get("/vnccs/get_cached_preview")
     async def get_cached_preview(request):

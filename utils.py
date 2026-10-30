@@ -487,6 +487,67 @@ def ensure_costume_structure(name: str, costume: str, emotions: List[str] = None
             os.makedirs(costume_path)
 
 
+_FILE_HASH_CACHE: Dict[str, Tuple[int, int, str]] = {}
+_FILE_HASH_LOCK = threading.Lock()
+CHARACTER_FILE_EXTENSIONS = {".png", ".webp", ".jpg", ".jpeg", ".json"}
+
+
+def _cached_sha256(path: str, size: int, mtime_ns: int) -> str:
+    """sha256 of a file, cached by (size, mtime) so repeated listings do not re-read images."""
+    with _FILE_HASH_LOCK:
+        hit = _FILE_HASH_CACHE.get(path)
+    if hit and hit[0] == size and hit[1] == mtime_ns:
+        return hit[2]
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    value = digest.hexdigest()
+    with _FILE_HASH_LOCK:
+        _FILE_HASH_CACHE[path] = (size, mtime_ns, value)
+    return value
+
+
+def list_character_files(name: str, with_sha256: bool = True) -> List[Dict[str, Any]]:
+    """Every image and config file of a character, for clients that mirror results (VNCCS Studio).
+
+    ``subfolder``/``filename`` are what ComfyUI's /view takes with type=output; ``path`` is relative
+    to the character folder. Version archives (V1, V2, ...) are included and flagged.
+    """
+    root = character_dir(name)
+    output_root = os.path.dirname(os.path.dirname(os.path.dirname(root)))
+    files: List[Dict[str, Any]] = []
+    if not os.path.isdir(root):
+        return files
+    for current, dirs, names in os.walk(root):
+        dirs.sort()
+        for filename in sorted(names):
+            if os.path.splitext(filename)[1].lower() not in CHARACTER_FILE_EXTENSIONS:
+                continue
+            full = os.path.join(current, filename)
+            try:
+                stat = os.stat(full)
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            entry = {
+                "path": rel,
+                "filename": filename,
+                "subfolder": os.path.relpath(current, output_root).replace(os.sep, "/"),
+                "type": "output",
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+                "archived": any(is_sprite_archive_dir(part) for part in rel.split("/")[:-1]),
+            }
+            if with_sha256:
+                try:
+                    entry["sha256"] = _cached_sha256(full, stat.st_size, stat.st_mtime_ns)
+                except OSError:
+                    continue
+            files.append(entry)
+    return files
+
+
 def list_characters() -> List[str]:
     """Get list of existing characters from the current VNCCS character root."""
     base_path = base_output_dir()
