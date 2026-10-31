@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from pathlib import Path
 import json
+import shutil
 
 import pytest
 
@@ -92,17 +93,88 @@ def test_single_image_regeneration_preserves_published_sprites(tmp_path, monkeyp
     selected = 9 if cache_state == "invalid_index" else index
     state.update(regenerate_from="missing-stage" if cache_state == "invalid_stage" else stage, regenerate_index=selected)
     monkeypatch.setattr(node, "_run_bg_remove", lambda images, *args, **kwargs: torch.full_like(images, 0.9))
-    if cache_state != "healthy":
+    inputs_json = next(root.rglob("inputs.json"))
+    cached_inputs = inputs_json.read_bytes()
+    if cache_state not in ("healthy", "missing"):
         with pytest.raises(ValueError, match="Run the generator normally"):
             node.process(*arguments, widget_data=json.dumps(state), sheets_path=str(sheets), unique_id="audit")
         assert {path.name: path.read_bytes() for path in target.glob("*.png")} == before
     else:
         result = node.process(*arguments, widget_data=json.dumps(state), sheets_path=str(sheets), unique_id="audit")
-        assert result[0].shape[0] == 3
+        # Without the stage cache only the selected image is redrawn, from this run's inputs.
+        assert result[0].shape[0] == (3 if cache_state == "healthy" else 1)
         after = {path.name: path.read_bytes() for path in target.glob("*.png")}
         assert after.keys() == before.keys()
         for position, (name, original) in enumerate(sorted(before.items())):
             assert (after[name] != original) == (position == index)
+        if cache_state == "missing":
+            assert inputs_json.read_bytes() == cached_inputs
+            assert not cache_path.exists()
+
+
+def test_single_image_regeneration_of_another_costume_leaves_that_cache_alone(tmp_path, monkeypatch):
+    """The stage cache is one per generator node: a redraw of a costume that is not the last one generated."""
+    node = generator.VNCCS_ClothesGenerator()
+    output = tmp_path / "output"
+    root = output / "VNCCS" / "Characters" / "Alice"
+    monkeypatch.setattr(generator.folder_paths, "get_output_directory", lambda: str(output))
+    monkeypatch.setattr(node, "_find_pose_lora", lambda *args: {})
+    monkeypatch.setattr(node, "_extract_pipe", lambda *args: {"seed": 0})
+    monkeypatch.setattr(node, "_emit", lambda *args, **kwargs: None)
+    for method in ("_run_pose_generation", "_run_upscaler", "_run_source_upscaler"):
+        monkeypatch.setattr(node, method, lambda images, *args, **kwargs: images)
+    images = torch.stack([torch.full((8, 8, 4), value) for value in (0.1, 0.2, 0.3)])
+    state = {"character_name": "Alice", "nsfw_enabled": False, "bg_remove": {"preset": "Native"}}
+    arguments = (images, images[:1], object(), "Pose")
+    sheets = {}
+    for costume in ("Coat", "Hat"):
+        sheets[costume] = root / "Sheets" / costume / "neutral"
+        sheets[costume].mkdir(parents=True)
+        utils.save_costume_info("Alice", costume, {})
+        node.process(*arguments, widget_data=json.dumps(state), sheets_path=str(sheets[costume]), unique_id="audit")
+    hat_cache = {path: path.read_bytes() for path in root.rglob("_stage_cache/*") if path.is_file()}
+    coat = root / "Sprites" / "Coat" / "Neutral"
+    before = {path.name: path.read_bytes() for path in coat.glob("*.png")}
+    state.update(regenerate_from="pose_generation", regenerate_index=1)
+    monkeypatch.setattr(node, "_run_bg_remove", lambda images, *args, **kwargs: torch.full_like(images, 0.9))
+    result = node.process(*arguments, widget_data=json.dumps(state), sheets_path=str(sheets["Coat"]), unique_id="audit")
+    assert result[0].shape[0] == 1
+    after = {path.name: path.read_bytes() for path in coat.glob("*.png")}
+    assert [name for name in sorted(after) if after[name] != before[name]] == ["sprite_pose_0002.png"]
+    assert {path: path.read_bytes() for path in root.rglob("_stage_cache/*") if path.is_file()} == hat_cache
+    assert not list((root / "Sprites" / "Coat" / "Neutral").glob("V*"))
+
+
+def test_clone_single_image_regeneration_without_cache_redraws_only_its_costume(tmp_path, monkeypatch):
+    node = generator.VNCCS_CharacterCloneGenerator()
+    output = tmp_path / "output"
+    root = output / "VNCCS" / "Characters" / "Alice"
+    sheets = root / "Sheets" / "Naked" / "neutral"
+    sheets.mkdir(parents=True)
+    monkeypatch.setattr(generator.folder_paths, "get_output_directory", lambda: str(output))
+    for method in ("_find_pose_lora", "_find_clothes_lora"):
+        monkeypatch.setattr(node, method, lambda *args: {})
+    monkeypatch.setattr(node, "_extract_pipe", lambda *args: {"seed": 0})
+    monkeypatch.setattr(node, "_emit", lambda *args, **kwargs: None)
+    for method in ("_run_pose_generation", "_run_upscaler", "_run_remove_clothes"):
+        monkeypatch.setattr(node, method, lambda images, *args, **kwargs: images)
+    images = torch.stack([torch.full((8, 8, 4), value) for value in (0.1, 0.2, 0.3)])
+    state = {"character_name": "Alice", "nsfw_enabled": True, "bg_remove": {"preset": "Native"}}
+    arguments = (images, images[:1], object(), "Pose")
+    node.process(*arguments, widget_data=json.dumps(state), sheets_path=str(sheets), unique_id="audit")
+    sets = {name: root / "Sprites" / name / "Neutral" for name in ("Original", "Naked")}
+    files = lambda folder: {path.name: path.read_bytes() for path in folder.glob("*.png")}
+    for path in list(root.rglob("_stage_cache")):
+        shutil.rmtree(path)
+    monkeypatch.setattr(node, "_run_bg_remove", lambda images, *args, **kwargs: torch.full_like(images, 0.9))
+    for stage, changed in (("naked_pose_generation", "Naked"), ("original_pose_generation", "Original")):
+        before = {name: files(folder) for name, folder in sets.items()}
+        state.update(regenerate_from=stage, regenerate_index=2)
+        node.process(*arguments, widget_data=json.dumps(state), sheets_path=str(sheets), unique_id="audit")
+        for name, folder in sets.items():
+            after = files(folder)
+            assert after.keys() == before[name].keys()
+            assert [file for file in sorted(after) if after[file] != before[name][file]] == (["sprite_pose_0003.png"] if name == changed else [])
 
 
 @pytest.mark.parametrize("stage, index", [("emotion_0001_bg_remove", 1), ("missing-stage", 0)])

@@ -1237,10 +1237,38 @@ class VNCCS_CharacterGenerator:
             raise ValueError("Selected image index must be a non-negative integer")
         return value
 
+    def _begin_standalone_regenerate(self, cache_dir, sheets_path, order, regenerate_from, regenerate_index):
+        """Redraw one image without this run's stage cache.
+
+        The cache is one per generator node, not per costume, and a client that keeps characters
+        itself may have removed it. When it is missing, incomplete or belongs to another sheet
+        (costume), the selected image is redrawn from this run's own inputs through every later
+        stage, only its sprite file is written, and the cache of the other run is left alone.
+        """
+        self._standalone_index = None
+        if regenerate_index is None or not regenerate_from:
+            return False
+        cached = _load_run_inputs(cache_dir, ("sheets_path",))
+        same_sheet = bool(cached) and (not sheets_path or str(cached.get("sheets_path") or "") == str(sheets_path))
+        start = max(0, self._stage_index(order, regenerate_from))
+        batches = [stage for stage in order[start:] if stage not in ("remove_clothes", "source_upscaler")]
+        complete = all(os.path.exists(_cache_tensor_path(cache_dir, stage) or "") for stage in batches)
+        if same_sheet and complete:
+            return False
+        self._standalone_index = regenerate_index
+        log_event('info', component='Generator', level='info', message=f"No stage cache of this sheet: redrawing image {regenerate_index + 1} from this run's inputs")
+        return True
+
+    def _standalone(self):
+        return getattr(self, "_standalone_index", None) is not None
+
     def _slice_batch_item(self, values, index):
         if index is None:
             return values
         batch = self._list_to_batch(values)
+        # Without a stage cache the later stages already hold only the selected image.
+        if self._standalone() and torch.is_tensor(batch) and batch.ndim == 4 and batch.shape[0] == 1:
+            return batch
         if torch.is_tensor(batch) and batch.ndim == 4 and 0 <= index < batch.shape[0]:
             return batch[index:index + 1]
         raise ValueError("Selected image is unavailable. Run the generator normally before regenerating one image.")
@@ -1257,7 +1285,7 @@ class VNCCS_CharacterGenerator:
 
     def _replace_batch_item(self, cached, index, item):
         item = self._list_to_batch(item)
-        if index is None:
+        if index is None or self._standalone():
             return item
         cached = self._safe_image_batch(cached, stage="cache replace")
         if not torch.is_tensor(cached) or not torch.is_tensor(item) or cached.ndim != 4 or item.ndim != 4:
@@ -1289,6 +1317,8 @@ class VNCCS_CharacterGenerator:
         return cached
 
     def _save_stage(self, cache_dir, stage, images, normalized=False):
+        if self._standalone():
+            return
         _save_cached_tensor(cache_dir, stage, images if normalized else self._list_to_batch(images))
 
     def _extract_pipe(self, pipe):
@@ -2820,8 +2850,10 @@ class VNCCS_CharacterGenerator:
         sprite_set = _safe_sprite_set(sprite_set, "Naked")
         target_dir = safe_join_under(character_root, "Sprites", sprite_set, "Neutral")
         saved = []
-        with staged_image_batch(target_dir, version_existing=version_existing, lock_root=character_root) as stage:
-            for index, image in enumerate(images, start=1):
+        # A standalone redraw publishes only its sprite; the batch keeps the other files.
+        first = self._standalone_index + 1 if self._standalone() else 1
+        with staged_image_batch(target_dir, version_existing=version_existing and not self._standalone(), lock_root=character_root) as stage:
+            for index, image in enumerate(images, start=first):
                 filename = f"sprite_pose_{index:04d}.png"
                 path = os.path.join(stage, filename)
                 self._tensor_item_to_pil(image).save(path, format="PNG")
@@ -2847,7 +2879,8 @@ class VNCCS_CharacterGenerator:
             sheets_path = self._unwrap_scalar(sheets_path)
             cache_dir = _character_cache_dir_from_sheets_path(sheets_path, widget_payload.get("character_name", ""), unique_id, self._progress_scope)
             _remember_generator_context(unique_id, "VNCCS_CharacterGenerator", cache_dir, pipe, self._progress_scope)
-            if regenerate_from:
+            standalone = self._begin_standalone_regenerate(cache_dir, sheets_path, ("pose_generation", "upscaler", "bg_remove"), regenerate_from, regenerate_index)
+            if regenerate_from and not standalone:
                 cached_inputs = _load_run_inputs(cache_dir)
                 poses = cached_inputs.get("poses", poses)
                 character = cached_inputs.get("character", character)
@@ -2857,7 +2890,7 @@ class VNCCS_CharacterGenerator:
             if not regenerate_from:
                 _rotate_preview_cache(cache_dir)
             _save_run_inputs(
-                cache_dir,
+                None if standalone else cache_dir,
                 poses=self._list_to_batch(poses),
                 character=self._list_to_batch(character),
                 prompt=prompt if isinstance(prompt, list) else str(prompt or ""),
@@ -2981,6 +3014,16 @@ class VNCCS_CharacterCloneGenerator(VNCCS_CharacterGenerator):
     FUNCTION = "process"
     CATEGORY = "VNCCS"
     DESCRIPTION = "Clone generator that creates original-clothes and cleaned-clothes sprite sets."
+
+    CLONE_ORDER = (
+        "original_pose_generation",
+        "original_upscaler",
+        "original_bg_remove",
+        "remove_clothes",
+        "naked_pose_generation",
+        "naked_upscaler",
+        "naked_bg_remove",
+    )
 
     def _clone_settings(self, widget_data):
         settings = self._settings(widget_data)
@@ -3132,7 +3175,8 @@ class VNCCS_CharacterCloneGenerator(VNCCS_CharacterGenerator):
             sheets_path = self._unwrap_scalar(sheets_path)
             cache_dir = _character_cache_dir_from_sheets_path(sheets_path, widget_payload.get("character_name", ""), unique_id, self._progress_scope)
             _remember_generator_context(unique_id, "VNCCS_CharacterCloneGenerator", cache_dir, pipe, self._progress_scope)
-            if regenerate_from:
+            standalone = self._begin_standalone_regenerate(cache_dir, sheets_path, self.CLONE_ORDER if nsfw_enabled else self.CLONE_ORDER[:3], regenerate_from, regenerate_index)
+            if regenerate_from and not standalone:
                 cached_inputs = _load_run_inputs(cache_dir)
                 poses = cached_inputs.get("poses", poses)
                 character = cached_inputs.get("character", character)
@@ -3142,7 +3186,7 @@ class VNCCS_CharacterCloneGenerator(VNCCS_CharacterGenerator):
             if not regenerate_from:
                 _rotate_preview_cache(cache_dir)
             _save_run_inputs(
-                cache_dir,
+                None if standalone else cache_dir,
                 poses=self._list_to_batch(poses),
                 character=self._list_to_batch(character),
                 prompt=prompt if isinstance(prompt, list) else str(prompt or ""),
@@ -3153,25 +3197,29 @@ class VNCCS_CharacterCloneGenerator(VNCCS_CharacterGenerator):
             pose_lora_info = self._find_pose_lora(pipe)
 
             bg_disabled = self._bg_remove_disabled(settings["bg_remove"])
-            original_final, original_pose, original_upscaled = self._run_sprite_branch(
-                poses,
-                character,
-                pipe,
-                prompt,
-                background,
-                settings,
-                unique_id,
-                cache_dir,
-                "original",
-                pose_lora_info,
-                regenerate_from=regenerate_from,
-                regenerate_index=regenerate_index,
-            )
-            original_saved = self._save_final_sprites(original_final, sheets_path, character_name, "Original", version_existing=not regenerate_from, normalized=bg_disabled)
-            if original_saved or bg_disabled:
-                self._emit(unique_id, "original_bg_remove", "done", original_final, f"Saved {len(original_saved)} original sprites", cache_dir=cache_dir, preview_paths=original_saved if bg_disabled else None)
+            # A standalone redraw touches only the costume of the selected image.
+            redraw_naked_only = standalone and str(regenerate_from).startswith("naked_")
+            original_final = original_pose = original_upscaled = None
+            if not redraw_naked_only:
+                original_final, original_pose, original_upscaled = self._run_sprite_branch(
+                    poses,
+                    character,
+                    pipe,
+                    prompt,
+                    background,
+                    settings,
+                    unique_id,
+                    cache_dir,
+                    "original",
+                    pose_lora_info,
+                    regenerate_from=regenerate_from,
+                    regenerate_index=regenerate_index,
+                )
+                original_saved = self._save_final_sprites(original_final, sheets_path, character_name, "Original", version_existing=not regenerate_from, normalized=bg_disabled)
+                if original_saved or bg_disabled:
+                    self._emit(unique_id, "original_bg_remove", "done", original_final, f"Saved {len(original_saved)} original sprites", cache_dir=cache_dir, preview_paths=original_saved if bg_disabled else None)
 
-            if not nsfw_enabled:
+            if not nsfw_enabled or (standalone and not redraw_naked_only):
                 return original_final, original_final, original_final, original_pose, original_upscaled, character, original_pose
 
             clothes_lora_info = self._find_clothes_lora(pipe)
@@ -3241,6 +3289,8 @@ class VNCCS_CharacterCloneGenerator(VNCCS_CharacterGenerator):
             if naked_saved or bg_disabled:
                 self._emit(unique_id, "naked_bg_remove", "done", naked_final, f"Saved {len(naked_saved)} naked sprites", cache_dir=cache_dir, preview_paths=naked_saved if bg_disabled else None)
 
+            if redraw_naked_only:
+                return naked_final, naked_final, naked_final, naked_pose, _naked_upscaled, naked_character, naked_pose
             return original_final, original_final, naked_final, original_pose, original_upscaled, naked_character, naked_pose
         except Exception as exc:
             _forget_generator_context(unique_id, getattr(self, "_progress_scope", None))
@@ -3283,7 +3333,8 @@ class VNCCS_ClothesGenerator(VNCCS_CharacterGenerator):
             require_existing_costume(os.path.basename(character_root or ""), costume_name)
             cache_dir = _character_cache_dir_from_sheets_path(sheets_path, widget_payload.get("character_name", ""), unique_id, self._progress_scope)
             _remember_generator_context(unique_id, "VNCCS_ClothesGenerator", cache_dir, pipe, self._progress_scope)
-            if regenerate_from:
+            standalone = self._begin_standalone_regenerate(cache_dir, sheets_path, ("source_upscaler", "pose_generation", "upscaler", "bg_remove"), regenerate_from, regenerate_index)
+            if regenerate_from and not standalone:
                 cached_inputs = _load_run_inputs(cache_dir)
                 poses = cached_inputs.get("poses", poses)
                 character = cached_inputs.get("character", character)
@@ -3293,7 +3344,7 @@ class VNCCS_ClothesGenerator(VNCCS_CharacterGenerator):
             if not regenerate_from:
                 _rotate_preview_cache(cache_dir)
             _save_run_inputs(
-                cache_dir,
+                None if standalone else cache_dir,
                 poses=self._list_to_batch(poses),
                 character=self._list_to_batch(character),
                 prompt=prompt if isinstance(prompt, list) else str(prompt or ""),
