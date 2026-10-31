@@ -184,6 +184,91 @@ def _vnccs_register_endpoint():  # lazy registration to avoid import errors in a
             return web.json_response({"error": error}, status=409 if "exists" in error else 404)
         return web.json_response({"ok": True, "name": new})
 
+    @PromptServer.instance.routes.post("/vnccs/character_restore")
+    async def vnccs_character_restore(request):
+        """Write one file of a character (multipart: character, path, file) back to its folder.
+
+        For clients that keep characters themselves (VNCCS Studio): before a run they put the
+        config and the current images back, after it they remove the folder with /vnccs/delete.
+        ``path`` is relative to the character folder, as /vnccs/character_files reports it.
+        """
+        try:
+            from .utils import validate_privileged_request
+            validate_privileged_request(request)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=403)
+        try:
+            from .utils import (CHARACTER_FILE_EXTENSIONS, atomic_output_path, character_dir,
+                                character_storage_lock, ensure_safe_name, safe_join_under)
+            from .nodes.generator_context import forget_character_contexts
+            post = await request.post()
+            name = ensure_safe_name(str(post.get("character") or "").strip(), "character")
+            rel = str(post.get("path") or "").strip().replace("\\", "/")
+            upload = post.get("file")
+            if not rel or rel.startswith("/") or any(part in ("", ".", "..") for part in rel.split("/")):
+                raise ValueError("Invalid path")
+            if os.path.splitext(rel)[1].lower() not in CHARACTER_FILE_EXTENSIONS:
+                raise ValueError("Only character images and JSON files can be restored")
+            if upload is None or not hasattr(upload, "file"):
+                raise ValueError("file required")
+            data = upload.file.read()
+            root = character_dir(name)
+            target = safe_join_under(root, *rel.split("/"))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+        def write():
+            with character_storage_lock(root):
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with atomic_output_path(target) as temporary:
+                    with open(temporary, "wb") as handle:
+                        handle.write(data)
+                forget_character_contexts(root)
+
+        try:
+            await asyncio.to_thread(write)
+        except Exception as e:
+            traceback.print_exc()
+            return web.json_response({"error": "restore failed", "detail": str(e)}, status=500)
+        return web.json_response({"ok": True, "path": rel, "size": len(data)})
+
+    @PromptServer.instance.routes.post("/vnccs/studio_cleanup")
+    async def vnccs_studio_cleanup(request):
+        """Remove VNCCS Studio's temporary files: input/vnccs_studio/ and output/VNCCS_Studio/.
+
+        Studio keeps the originals on the Mac and uploads them again when a run needs them.
+        """
+        try:
+            from .utils import validate_privileged_request
+            validate_privileged_request(request)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=403)
+        import shutil
+        import folder_paths
+
+        def clean():
+            removed = 0
+            for root in (os.path.join(folder_paths.get_input_directory(), "vnccs_studio"),
+                         os.path.join(folder_paths.get_output_directory(), "VNCCS_Studio")):
+                if not os.path.isdir(root):
+                    continue
+                for entry in os.listdir(root):
+                    path = os.path.join(root, entry)
+                    if os.path.isdir(path) and not os.path.islink(path):
+                        removed += sum(len(files) for _, _, files in os.walk(path))
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
+                        removed += 1
+            return removed
+
+        try:
+            removed = await asyncio.to_thread(clean)
+        except Exception as e:
+            traceback.print_exc()
+            return web.json_response({"error": "cleanup failed", "detail": str(e)}, status=500)
+        return web.json_response({"ok": True, "removed": removed})
+
     @PromptServer.instance.routes.post("/vnccs/create")
     @PromptServer.instance.routes.get("/vnccs/create")
     async def vnccs_create_character(request):
