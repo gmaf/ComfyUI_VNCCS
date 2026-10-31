@@ -16,30 +16,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import numpy as np
 
 
-def test_cloner_download_routes_share_qwen_worker_and_keep_legacy_responses(monkeypatch):
+@pytest.mark.parametrize("installed", [True, False])
+def test_cloner_download_routes_report_the_wizard_text_encoder(monkeypatch, tmp_path, installed):
+    """The wizard encoder comes with the model manifest: the download route only reports whether it is there."""
     import asyncio
     pytest.importorskip("torch")
     from nodes import character_cloner as cloner, qwen_vl
 
-    started = []
-    monkeypatch.setattr(qwen_vl, "_QWEN_VL_DOWNLOAD_STATUS", {"status": "idle"})
-    monkeypatch.setattr(qwen_vl, "_find_qwen_vl_model", lambda: None)
-    monkeypatch.setattr(qwen_vl.threading, "Thread", lambda **kwargs:
-                        types.SimpleNamespace(start=lambda: started.append(kwargs)))
-    monkeypatch.setattr(cloner.web, "json_response", lambda data, status=200:
-                        types.SimpleNamespace(data=data, status=status), raising=False)
-    monkeypatch.setattr(cloner.web, "Response", lambda status=200, text="":
-                        types.SimpleNamespace(text=text, status=status), raising=False)
+    encoder = tmp_path / qwen_vl.WIZARD_CLIP_NAME
+    if installed:
+        encoder.write_bytes(b"encoder")
+    monkeypatch.setattr(qwen_vl, "_QWEN_VL_DOWNLOAD_STATUS", {"status": "idle", "progress": 0, "current_file": "", "error": ""})
+    monkeypatch.setattr(qwen_vl, "_wizard_clip_path", lambda: str(encoder))
+    reply = lambda data, status=200: types.SimpleNamespace(data=data, status=status)
+    monkeypatch.setattr(qwen_vl.web, "json_response", reply, raising=False)
+    monkeypatch.setattr(cloner.web, "json_response", reply, raising=False)
     request = types.SimpleNamespace(headers={"X-VNCCS-CSRF": "1"})
     response = asyncio.run(cloner.cloner_download_model(request))
     assert response.status == 200 and response.data == {"status": "started"}
-    assert started[0]["target"] is qwen_vl._qwen_vl_download_worker
-    assert started[0]["args"] == (True,)
     status = asyncio.run(cloner.cloner_download_status(request))
-    assert status.data == qwen_vl._QWEN_VL_DOWNLOAD_STATUS
-    response = asyncio.run(cloner.cloner_download_model(request))
-    assert response.status == 409 and response.text == "Download already in progress"
-    assert len(started) == 1
+    assert status.data["status"] == ("completed" if installed else "error")
+    assert (status.data["error"] == "") == installed
 
 
 @pytest.mark.parametrize("size", [(3, 7), (8, 2)])
@@ -269,16 +266,11 @@ def _run_wizard(monkeypatch, tmp_path, content, image=None):
     (image if image is not None else Image.new("RGB", (32, 64), "red")).save(tmp_path / "reference.png")
 
     calls = []
-    def complete(**kwargs):
+    def generate(**kwargs):
+        # The wizard runs on ComfyUI's TextGenerate (qwen_vl.generate_wizard_text): only its answer matters here.
         calls.append(kwargs)
-        return {"choices": [{"message": {"content": content}}]}
-    llama = types.ModuleType("llama_cpp")
-    llama.llama_chat_format = types.ModuleType("llama_cpp.llama_chat_format")
-    llama.llama_chat_format.Qwen35ChatHandler = type("Qwen35ChatHandler", (), {"__init__": lambda self, **kwargs: None})
-    llama.Llama = lambda **kwargs: types.SimpleNamespace(create_chat_completion=complete)
-    monkeypatch.setitem(sys.modules, "llama_cpp", llama)
-    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", llama.llama_chat_format)
-    monkeypatch.setitem(sys.modules, "json_repair", types.SimpleNamespace(loads=json.loads))
+        return content
+    monkeypatch.setattr(cloner, "generate_wizard_text", generate)
     return cloner._cloner_auto_generate_response({"image_name": "reference.png"}), calls
 
 

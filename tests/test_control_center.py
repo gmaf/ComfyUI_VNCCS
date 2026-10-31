@@ -672,52 +672,32 @@ class TestPackagedConfigSync:
         assert _sync_packaged_cc_config("someone/else", {"name": "remote"}) is False
         assert not target.exists()
 
-    def test_remote_config_refresh_replaces_local_copy(self, tmp_path, monkeypatch):
+    def test_packaged_catalog_is_pinned_and_never_replaced_from_hugging_face(self, tmp_path, monkeypatch):
+        """Fork: control_center.json lists what the deployment's model manifest downloads; a refresh keeps it."""
         target = tmp_path / "control_center.json"
-        remote = tmp_path / "remote_control_center.json"
-        target.write_text(json.dumps({
-            "name": "old",
+        pinned = {
+            "name": "pinned",
             "lora": [{
                 "name": "VNCCS Pose Studio Klein9b",
                 "version": "3.0",
                 "kind": "Klein9b",
             }],
-        }), encoding="utf-8")
-        remote_data = {
-            "name": "current",
-            "models": [],
-            "clip": [],
-            "vae": [],
-            "lora": [{
-                "name": "VNCCS Pose Studio Klein9b",
-                "version": "2.2",
-                "kind": "Klein9b",
-            }],
-            "controlnet": [],
-            "other": [],
         }
-        remote.write_text(json.dumps(remote_data), encoding="utf-8")
-
+        target.write_text(json.dumps(pinned), encoding="utf-8")
         monkeypatch.setattr(_CONTROL_CENTER_MODULE, "_get_packaged_cc_path", lambda: str(target))
-        download_args = {}
-
-        def fake_hf_download(**kwargs):
-            download_args.update(kwargs)
-            return str(remote)
-
-        monkeypatch.setattr(_CONTROL_CENTER_MODULE, "hf_hub_download", fake_hf_download)
+        monkeypatch.setattr(_CONTROL_CENTER_MODULE, "hf_hub_download", lambda **kwargs: pytest.fail("The pinned catalog must not be downloaded"))
         monkeypatch.setattr(_CONTROL_CENTER_MODULE, "_load_custom_loras", lambda: [])
         _CC_CONFIG_CACHE.clear()
 
         try:
             loaded = _get_cc_config("MIUProject/VNCCS_v3.0", prefer_remote=True)
+            assert _CONTROL_CENTER_MODULE._get_cc_config_source("MIUProject/VNCCS_v3.0") == "packaged"
         finally:
             _CC_CONFIG_CACHE.clear()
 
-        assert loaded["name"] == "current"
-        assert loaded["lora"][0]["version"] == "2.2"
-        assert json.loads(target.read_text(encoding="utf-8")) == remote_data
-        assert download_args["force_download"] is True
+        assert loaded["name"] == "pinned"
+        assert loaded["lora"][0]["version"] == "3.0"
+        assert json.loads(target.read_text(encoding="utf-8")) == pinned
 
     @pytest.mark.parametrize("local_available", [True, False])
     def test_remote_refresh_failure_uses_local_catalog_when_available(self, tmp_path, monkeypatch, local_available):
@@ -748,10 +728,13 @@ class TestPackagedConfigSync:
         finally:
             _CC_CONFIG_CACHE.clear()
 
-        assert download_args["force_download"] is True
-        assert download_args["token"] is False
         if local_available:
+            # Fork: with the pinned catalog on disk Hugging Face is not asked at all.
+            assert download_args == {}
             assert json.loads(target.read_text(encoding="utf-8")) == local_data
+        else:
+            assert download_args["force_download"] is True
+            assert download_args["token"] is False
 
     def test_packaged_catalog_uses_current_clothes_core(self):
         path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "control_center.json")
@@ -810,13 +793,10 @@ class TestPackagedConfigSync:
         h3_vaes = [entry for entry in config["vae"] if entry.get("kind") == "minimaxh3"]
         h3_loras = [entry for entry in config["lora"] if entry.get("kind") == "minimaxh3"]
 
-        assert [entry["type"] for entry in h3_models] == ["unet", "unet"]
-        assert [entry["hf_repo"] for entry in h3_models] == [
-            "Comfy-Org/MiniMax-H3",
-            "Comfy-Org/MiniMax-H3",
-        ]
+        # Fork: the FP8 Scaled checkpoint is not in the deployment's model manifest, only INT8 ConvRot.
+        assert [entry["type"] for entry in h3_models] == ["unet"]
+        assert [entry["hf_repo"] for entry in h3_models] == ["Comfy-Org/MiniMax-H3"]
         assert [entry["hf_path"] for entry in h3_models] == [
-            "diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
             "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
         ]
         assert [entry["clip_type"] for entry in h3_clips] == ["minimax"]

@@ -179,7 +179,8 @@ def test_slower_catalog_refresh_cannot_replace_newer_cache_or_packaged_catalog(m
         return str(new_path)
 
     monkeypatch.setattr(cc, "hf_hub_download", download)
-    repo_id = "MIUProject/VNCCS_v3.0"
+    # Fork: the packaged repository's catalog is pinned; the race guard still covers other catalogs.
+    repo_id = "someone/catalog"
     with ThreadPoolExecutor(max_workers=2) as executor:
         old = executor.submit(cc._get_cc_config, repo_id, True)
         try:
@@ -190,7 +191,8 @@ def test_slower_catalog_refresh_cannot_replace_newer_cache_or_packaged_catalog(m
             release_old.set()
         old.result(timeout=5)
     assert cc._get_cc_config(repo_id)["name"] == "New"
-    assert json.loads(packaged.read_text())["name"] == "New"
+    assert json.loads(packaged.read_text())["name"] == "Packaged"
+    assert cc._get_cc_config("MIUProject/VNCCS_v3.0", True)["name"] == "Packaged"
 
 
 @pytest.mark.parametrize("separator", ["/", "\\"])

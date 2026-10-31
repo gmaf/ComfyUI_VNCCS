@@ -1181,7 +1181,8 @@ def test_seedvr_loader_cleans_vram_and_uses_settings(monkeypatch):
     dit, vae = generator._run_upscaler_models(settings)
     generator._run_seedvr_upscale_one(torch.rand(1, 1584, 664, 3), dit, vae, settings, seed=42)
 
-    assert fake_mm.unloaded == 1
+    # Fork: no unload_all_models() before SeedVR (unified memory: the next model reloads instead); the cache is still emptied.
+    assert fake_mm.unloaded == 0
     assert fake_mm.emptied == 1
     assert calls[0][0] == "UNETLoader"
     assert calls[0][1]["unet_name"] == "custom_dit.safetensors"

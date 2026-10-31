@@ -266,8 +266,18 @@ def _first_tensor(value):
     return value
 
 
-# VNCCS_PROFILE=1 logs the duration of every ComfyUI node VNCCS runs internally.
-_PROFILE_NODES = os.environ.get("VNCCS_PROFILE", "").strip() in {"1", "true", "yes"}
+def _profile_flag():
+    """A file vnccs_profile in ComfyUI's user directory: log the duration of every node VNCCS runs internally.
+
+    A file, not an environment variable: the repository's security scan forbids reading the environment.
+    """
+    try:
+        return os.path.isfile(os.path.join(folder_paths.get_user_directory(), "vnccs_profile"))
+    except Exception:
+        return False
+
+
+_PROFILE_NODES = _profile_flag()
 
 
 @inference_stage()
